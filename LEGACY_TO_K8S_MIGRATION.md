@@ -236,7 +236,7 @@ standard Linux service controls.
 #### 1.5 Validate the application is running
 
 ### 2. External Dependency: PostgreSQL
-#### 2.1 Create the PostgreSQL host (or service)
+#### 2.1 Create the PostgreSQL host
 #### 2.2 Install PostgreSQL
 #### 2.3 Create database + user
 #### 2.4 Configure network access (listen_addresses, firewall, pg_hba.conf)
