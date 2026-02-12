@@ -226,7 +226,54 @@ For the sake of improving reliability, the application will then be configured t
 a `systemd` service. This allows it to start automatically on boot and be managed using
 standard Linux service controls.
 ##### 1.4.1 Build the Application
+We're going to generate the Spring Boot application using Spring Initializer (https://start.spring.io) 
+and transfer it to the legacy VM as a compressed source archive using `scp`. We can then build the
+application directly on the legacy host using Maven.
 
+This reflects a common legacy deployment pattern where source code, build tooling, and runtime 
+execution all exist on the same server. Updates require manually transferring the source code, 
+rebuilding the application, and restarting the process. The lack of separation between build and 
+runtime responsibilities highlights the need for Continuous Integration (CI), which is able to separate 
+artifact creation from application execution and reduce manual intervention.
+
+For our lab, we're going to be using Maven as our build tool. Maven was chosen because of its 
+widespread use in Java-based enterprise applications, predictable dependency management, and
+compatibility with CI systems such as Jenkins, which we'll introduce later in the migration. By opting
+for Maven now, we ensure alignment between the legacy deployment model and our future Jenkins
+CI pipeline, where we known Maven will also be used to produce build outputs used for containerization.
+
+Let's include the following dependencies:
+- **Spring Web:** Provides REST API capabilities and foundational web-oriented integration features
+- **Spring Boot Actuator:** Exposes health and metrics endpoints for basic observability 
+- **Validation:** Enables request validation and input constraints
+
+We can either generate the application using our CLI or the web UI. If we opt for using the CLI method, the 
+
+Instead of using the web interface (Spring Initializr: https://start.spring.io), we can use `curl` to call its 
+public API directly and generate the project in our CLI environment:
+```bash
+curl https://start.spring.io/starter.zip \
+  -d type=maven-project \
+  -d language=java \
+  -d bootVersion=3.2.1 \
+  -d baseDir=legacy-app \
+  -d groupId=com.lab.legacy \
+  -d artifactId=legacy-service \
+  -d name=legacy-service \
+  -d packageName=com.lab.legacy.service \
+  -d dependencies=web,actuator,validation \
+  -o legacy-service.zip
+```
+
+After unzipping the JAR artifact (`legacy-service.zip`) in this case by running `unzip legacy-service.zip`, 
+we can `cd` into the unzipped artifact's main directory. If we open `pom.xml` in the main directory, we can
+notice all the dependencies included and verify the dependencies we selected are included.
+
+Now we need to add a minimal REST controller so the application does something observable, which
+is required to:
+- Validate the app works
+- Expose health/readiness
+- Make the Container/Kubernetes behavior meaningful
 ##### 1.4.2 Create the Controller
 
 ##### 1.4.3 Initial Run
