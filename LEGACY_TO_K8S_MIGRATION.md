@@ -5,7 +5,7 @@
 **Status:** In Progress  
 
 ---
-## Executive Summary
+# Executive Summary
 
 This project documents the migration of a legacy Spring Boot application from
 an Ubuntu 18.04 virtual machine to a containerized Kubernetes platform. Source
@@ -22,7 +22,7 @@ building automated deployment pipelines, and operating containerized workloads
 in a production-like Kubernetes environment.
 
 ---
-## Problem Statement
+# Problem Statement
 
 The application was deployed as a Spring Boot service running directly on an
 Ubuntu 18.04 virtual machine with manual deployment processes. Application
@@ -36,8 +36,8 @@ limited scalability, and made it difficult to adopt modern deployment and automa
 practices.
 
 ---
-## Goals and Non-Goals
-### Goals
+# Goals and Non-Goals
+## Goals
 
 - Migrate a legacy Spring Boot application from an Ubuntu 18.04 virtual
   machine to a containerized, Kubernetes-based deployment model.
@@ -54,7 +54,7 @@ practices.
   environment to mirror real-world platform engineering workflows.
 - Deploy and operate the application on an Amazon EKS cluster, using Kubernetes
   deployments, services, and health checks to reflect a real production environment. 
-### Non-Goals
+## Non-Goals
 
 - Changing how the application works internally or breaking it into multiple smaller services
 - Changing how the database is structured internally, beyond moving it to Amazon RDS and keeping it compatible with the existing application.
@@ -63,7 +63,7 @@ practices.
 - Optimizing application performance to make it faster than it was in the legacy setup.
 
 ---
-## Target Architecture
+# Target Architecture
 
 The target architecture moves the application from a host-bound deployment
 model to a containerized, Kubernetes-managed workload. The Spring Boot
@@ -72,7 +72,7 @@ automated CI pipeline, and deployed onto Amazon EKS. PostgreSQL remains an
 external dependency and is provided as a managed Amazon RDS service, accessed 
 by the application over the network.
 
-### High-Level Components
+## High-Level Components
 
 - **CI (Jenkins):** Builds the application, runs the container build, and
   publishes versioned images.
@@ -83,7 +83,7 @@ by the application over the network.
 - **External Dependency (Amazon RDS for PostgreSQL):** A managed PostgreSQL
   database service accessible from the application workload over the network.
 
-### Deployment Flow
+## Deployment Flow
 
 1. A source change on GitHub repository.
 2. Jenkins builds the Spring Boot artifact and produces a Docker image.
@@ -93,7 +93,7 @@ by the application over the network.
 6. The application connects to Amazon RDS for PostgreSQL using environment-provided
    connection parameters (host, port, database, username, password).
 
-### Kubernetes Workload Design
+## Kubernetes Workload Design
 
 - **Deployment:** Manages replica count, rolling updates, and self-healing.
 - **Service:** Provides a stable virtual IP/DNS name for the application.
@@ -104,7 +104,7 @@ by the application over the network.
   Secrets credentials are injected via Secrets (or an external secrets
   mechanism), keeping the container image immutable.
 
-### External Dependency Boundary (Amazon RDS for PostgreSQL)
+## External Dependency Boundary (Amazon RDS for PostgreSQL)
 
 PostgreSQL is treated as an external system with a clear boundary:
 Amazon RDS for PostgreSQL is treated as an external managed system with a clear
@@ -116,7 +116,7 @@ operational boundary.
 - Database concerns (backups, patching, storage durability, high availability) are handled
   by Amazon RDS and are separatedd from the application deployment lifecycle.
 
-### Desired Outcomes
+## Desired Outcomes
 
 - Repeatable builds and deployments via CI.
 - Reduced changes in configuration through immutable container images and 
@@ -125,7 +125,7 @@ operational boundary.
 - Clear separation between stateless application and a managed,
   stateful database service.
 
-### Architecture Diagram
+## Architecture Diagram
 ```text
 Developer Commit (GitHub)
         |
@@ -144,7 +144,7 @@ Amazon EKS (Kubernetes)
   ├─ Service (Stable In-Cluster Endpoint)
   └─ ConfigMap / Secret (DB Connection Settings)
         |
-        |  TCP 5432 (VPC Networking)
+        |  TCP 5432 (VPC Networking / Security Groups)
         v
 Amazon RDS for PostgreSQL
   ├─ Managed Storage & Backups
@@ -152,9 +152,9 @@ Amazon RDS for PostgreSQL
 ```
 
 ---
-## Legacy Environment (Build Guide)
-### 1. Legacy Application Host
-#### 1.1 Create the VM
+# Legacy Environment (Build Guide)
+## 1. Legacy Application Host
+### 1.1 Create the VM
 A virtual machine was created in Proxmox to represent the legacy application
 host. The VM was configured to closely match the original deployment environment,
 using Ubuntu 18.04 as the operating system. Resources were allocated to be
@@ -163,7 +163,7 @@ introducing artificial constraints.
 
 This environment provides a baseline for comparing the legacy deployment model
 with the containerized Kubernetes-based approach.
-#### 1.2 Baseline OS configuration
+### 1.2 Baseline OS configuration
 After we create and provision the VM, the operating system needs to be prepared
 for use as a long-running application host. SSH access needs to be enabled to allow 
 remote administration and the `qemu-guest-agent` was installed and activated to 
@@ -184,7 +184,7 @@ sudo apt install -y qemu-guest-agent openssh-server
 # Enable and start the installed services
 sudo systemctl enable --now qemu-guest-agent ssh
 ```
-#### 1.3 Install required packages (Java, etc.)
+### 1.3 Install required packages (Java, etc.)
 The required runtime packages were installed to support execution of the
 Spring Boot application. This included installing a compatible Java runtime
 environment and any supporting tools required to build or run the
@@ -217,7 +217,7 @@ sudo apt install openjdk-17-jdk -y
 java --version
 ```
 After we confirm the Java version matches what we want, we can move onto the next phase.
-#### 1.4 Deploy / run the Spring Boot application
+### 1.4 Deploy / run the Spring Boot application
 This section is going to focus on building and deploying our Spring Boot application directly 
 on the host as a standalone JAR file. The application was initially started manually using the 
 Java runtime, showcasing a typical legacy deployment approach.
@@ -225,9 +225,9 @@ Java runtime, showcasing a typical legacy deployment approach.
 For the sake of improving reliability, the application will then be configured to run as
 a `systemd` service. This allows it to start automatically on boot and be managed using
 standard Linux service controls.
-##### 1.4.1 Build the Application
+#### 1.4.1 Build the Application
 We're going to generate the Spring Boot application using Spring Initializer (https://start.spring.io) 
-and transfer it to the legacy VM as a compressed source archive using `scp`. We can then build the
+	and transfer it to the legacy VM as a compressed source archive using `scp`. We can then build the
 application directly on the legacy host using Maven.
 
 This reflects a common legacy deployment pattern where source code, build tooling, and runtime 
@@ -269,46 +269,78 @@ After unzipping the JAR artifact (`legacy-service.zip`) in this case by running 
 we can `cd` into the unzipped artifact's main directory. If we open `pom.xml` in the main directory, we can
 notice all the dependencies included and verify the dependencies we selected are included.
 
-Now we need to add a minimal REST controller so the application does something observable, which
-is required to:
-- Validate the app works
-- Expose health/readiness
-- Make the Container/Kubernetes behavior meaningful
-##### 1.4.2 Create the Controller
+Now we need to add a minimal REST controller so the application does something observable.
+#### 1.4.2 Create the Controller
+Now we can add a lightweight REST controller to provide a simple HTTP endpoint for functional verification. 
+Having this endpoint serves the following purposes:
+- Validate the app works, by confirming the Spring Boot application is running and reachable over HTTP
+- Make the Container/Kubernetes behavior meaningful by providing a stable request/response that can 
+  be reused later when validating containerized and Kubernetes deployments.
+Without the controller, we'd be deploying a dead service.
 
-##### 1.4.3 Initial Run
+If navigate to our `service` directory, let's first create a `controller` directory where we can create a REST 
+named `HelloController.java`. If you have difficulty finding the adequate `service` directory, installing and 
+using the `tree` command from the apps main directory helps visualize the apps structure and where different 
+components live. This controller will return a JSON response when testing the `/hello` endpoint because:
+- Docker tests can parse JSON
+- Kubernetes health probes and checks can hit it
+- More metadata fields can be added later
+- It more closely resembles a real service response
+Here's what our `HelloController` file will look like:
+```java
+package com.lab.legacy.legacy.service.controller;
 
-##### 1.4.4 Systemd Implementation
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+import java.util.Map;
 
-#### 1.5 Validate the application is running
+@RestController
+public class HelloController {
 
-### 2. External Dependency: PostgreSQL
-#### 2.1 Create the PostgreSQL host
-#### 2.2 Install PostgreSQL
-#### 2.3 Create database + user
-#### 2.4 Configure network access (listen_addresses, firewall, pg_hba.conf)
-#### 2.5 Configure the Spring Boot connection settings
-#### 2.6 Validate connectivity end-to-end
+        @GetMapping("/hello")
+        public Map<String, String> hello() {
+                return Map.of(
+                        "status", "ok",
+                        "service", "legacy-service"
+                );
+        }
+```
+Luckily, Spring Boot automatically serializes the `Map` to Jason using Jackson, meaning that the framework 
+easily converts Java `Map` objects to JSON format when returning it from the controller method. This is great
+as it means avoiding having to write explicit conversion code. This endpoint will serve as a consistent validation
+target throughout the migration process. It allows us to verify functionality in the legacy VM, within a Docker 
+container, and later inside Kubernetes without modifying the logic of the base application.
+#### 1.4.3 Initial Run
+
+#### 1.4.4 Systemd Implementation
+
+### 1.5 Validate the application is running
+
+## 2. External Dependency: PostgreSQL
+### 2.1 Create the PostgreSQL host (or service)
+### 2.2 Install PostgreSQL
+### 2.3 Create database + user
+### 2.4 Configure network access (listen_addresses, firewall, pg_hba.conf)
+### 2.5 Configure the Spring Boot connection settings
+### 2.6 Validate connectivity end-to-end
 
 
 ---
-## Migration Strategy
+# Migration Strategy
 
 **Status:** *Completed. Missing polished documentation*
 
 ---
-## CI & Platform Implementation
+# CI & Platform Implementation
 
 **Status:** *Completed. Missing polished documentation*
 
 ---
-## Kubernetes Implementation
+# Kubernetes Implementation
 
 **Status:** *Completed. Missing polished documentation*
 
 ---
-## External Dependency Integration (PostgreSQL / RDS)
+# External Dependency Integration (PostgreSQL / RDS)
 
 **Status:** *In Progress*
-
----
