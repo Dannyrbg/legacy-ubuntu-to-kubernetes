@@ -311,7 +311,68 @@ as it means avoiding having to write explicit conversion code. This endpoint wil
 target throughout the migration process. It allows us to verify functionality in the legacy VM, within a Docker 
 container, and later inside Kubernetes without modifying the logic of the base application.
 #### 1.4.3 Initial Run
+With the controller in place, we can run the application directly on the legacy host VM to validate that it starts
+successfully and serves HTTP requests. Navigate to the project's root directory, and first make sure we have the
+right permissions to run the `./mvnw` bash script to build the application from source and produce a deployable JAR:
+```bash
+ls -l mvnw
+# Make script executable
+chmod +x mvnw
+```
+Now, let's build the application using Maven:
+```bash
+cd ~/legacy-service
+./mvnw clean package
+```
+Running this script runs the Maven Wrapper included with the Spring Boot project. `./mvnw` runs the wrapper 
+script in the current directory, ensuring the correct Maven version is used and doesn't require a system-wide 
+installation of Maven. `clean` deletes the `target/` directory, removing old compiled files and artifacts to ensure
+a fresh build. `package` compiles the Java source code, runs tests (if configured), and packages the application 
+into a JAR file.
 
+This produces an executable JAR file in the `target/` directory. Inside the `target/` directory, we'll see something
+like `legacy-service-0.0.1-SNAPSHOT.jar`; this is our executable Spring Boot artifact.
+
+Next, let's start the application manually using the Java runtime:
+```bash
+java -jar target/*.jar
+```
+Running `java` runs the Java Virtual Machine, while `-jar` tells Java to execute the JAR as an application. Spring
+Boot JAR files are self-contained, including an embedded Tomcat server and all required application dependencies.
+We use the shell wildcard in `target/*.jar` that expands to: `target/legacy-service-0.0.1-SNAPSHOT.jar`.
+
+There are four key things that occur when we run this command. Spring Boot:
+1. Starts the embedded Tomcat server
+2. Binds to port 8080 (default)
+3. Loads our controller
+4. Serves HTTP requests
+You should see something like this:
+```bash
+Tomcat started on port(s): 8080
+Started LegacyServiceApplication
+```
+A potential pitfall to avoid is using `sudo` when executing the starting application command. Running the command
+as root increases security risk. It isn't needed for port 8080 and is just general malpractice for application services. 
+When we implement `systemd` in the next section, we'll be running the application under a dedicated service user 
+and not root.
+
+After the application is started and it launches the embedded web server on port 8080, we can open a separate terminal
+session to test the endpoint using `curl`.
+
+Running:
+```bash
+curl http://localhost:8080/hello
+```
+Should output:
+```JSON
+{"status":"ok","service":"legacy-service"}
+```
+
+If you can't open a separate terminal, we can alternatively start the application in the background by adding `&` to the end
+of the command:
+```bash
+java -jar target/*.jar &
+```
 #### 1.4.4 Systemd Implementation
 
 ### 1.5 Validate the application is running
