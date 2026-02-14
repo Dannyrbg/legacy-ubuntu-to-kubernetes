@@ -217,17 +217,9 @@ sudo apt install openjdk-17-jdk -y
 java --version
 ```
 After we confirm the Java version matches what we want, we can move onto the next phase.
-### 1.4 Deploy / run the Spring Boot application
-This section is going to focus on building and deploying our Spring Boot application directly 
-on the host as a standalone JAR file. The application was initially started manually using the 
-Java runtime, showcasing a typical legacy deployment approach.
-
-For the sake of improving reliability, the application will then be configured to run as
-a `systemd` service. This allows it to start automatically on boot and be managed using
-standard Linux service controls.
-#### 1.4.1 Build the Application
+### 1.4 Build the Application
 We're going to generate the Spring Boot application using Spring Initializer (https://start.spring.io) 
-	and transfer it to the legacy VM as a compressed source archive using `scp`. We can then build the
+and transfer it to the legacy VM as a compressed source archive using `scp`. We can then build the
 application directly on the legacy host using Maven.
 
 This reflects a common legacy deployment pattern where source code, build tooling, and runtime 
@@ -270,7 +262,7 @@ we can `cd` into the unzipped artifact's main directory. If we open `pom.xml` in
 notice all the dependencies included and verify the dependencies we selected are included.
 
 Now we need to add a minimal REST controller so the application does something observable.
-#### 1.4.2 Create the Controller
+### 1.5 Create the Controller
 Now we can add a lightweight REST controller to provide a simple HTTP endpoint for functional verification. 
 Having this endpoint serves the following purposes:
 - Validate the app works, by confirming the Spring Boot application is running and reachable over HTTP
@@ -310,7 +302,7 @@ easily converts Java `Map` objects to JSON format when returning it from the con
 as it means avoiding having to write explicit conversion code. This endpoint will serve as a consistent validation
 target throughout the migration process. It allows us to verify functionality in the legacy VM, within a Docker 
 container, and later inside Kubernetes without modifying the logic of the base application.
-#### 1.4.3 Initial Run
+### 1.6 Initial Run
 With the controller in place, we can run the application directly on the legacy host VM to validate that it starts
 successfully and serves HTTP requests. Navigate to the project's root directory, and first make sure we have the
 right permissions to run the `./mvnw` bash script to build the application from source and produce a deployable JAR:
@@ -398,8 +390,9 @@ This will give us:
 - `/actuator/health`
 - `/actuator/health/liveness`
 - `/actuator/health/readiness`
-
-Adding these Actuator endpoints is important to expose liveness and readiness endpoints so the runtime platform can determine container health. These endpoints will later be used by Docker and Kubernetes to verify container health and readiness without modifying the application code.
+Adding these Actuator endpoints is important to expose liveness and readiness endpoints so the runtime platform 
+can determine container health. These endpoints will later be used by Docker and Kubernetes to verify container 
+health and readiness without modifying the application code.
 
 For quick validation, we can run:
 ```bash
@@ -407,7 +400,7 @@ curl http://localhost:8080/actuator/health
 curl http://localhost:8080/actuator/health/liveness
 curl http://localhost:8080/actuator/health/readiness
 ```
-#### 1.4.4 Systemd Implementation
+### 1.7 Systemd Implementation
 Running the application manually using `java -jar` requires a persistent terminal session and it doesn't survive 
 system reboots. To simulate a more realistic legacy operations model, let's convert the application into a 
 `systemd`-managed service.
@@ -498,7 +491,7 @@ While this approach improves reliability compared to manual execution, build, de
 responsibilities remain tightly dependent to the host. This limitation motivates the introduction of containerization
 and CI in the next phase of migration. 
 
-**Troubleshooting: Port Conflicts**  
+**Troubleshooting: Port Conflicts**
 If the service fails to start and logs indicate that port `8080` is already in use, another process is bound to
 the same port.
 We can resolve this issue as follows:
@@ -509,8 +502,6 @@ sudo kill -9 <PID>
 sudo systemctl start legacy-service
 sudo systemctl status legacy-service --no-pager
 ```
-### 1.5 Validate the application is running
-
 ## 2. External Dependency: PostgreSQL
 ### 2.1 Create the PostgreSQL host (or service)
 ### 2.2 Install PostgreSQL
