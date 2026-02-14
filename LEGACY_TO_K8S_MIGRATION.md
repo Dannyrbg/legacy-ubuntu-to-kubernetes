@@ -398,6 +398,7 @@ This will give us:
 - `/actuator/health`
 - `/actuator/health/liveness`
 - `/actuator/health/readiness`
+
 Adding these Actuator endpoints is important to expose liveness and readiness endpoints so the runtime platform can determine container health. These endpoints will later be used by Docker and Kubernetes to verify container health and readiness without modifying the application code.
 
 For quick validation, we can run:
