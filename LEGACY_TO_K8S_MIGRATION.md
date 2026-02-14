@@ -356,8 +356,8 @@ as root increases security risk. It isn't needed for port 8080 and is just gener
 When we implement `systemd` in the next section, we'll be running the application under a dedicated service user 
 and not root.
 
-After the application is started and it launches the embedded web server on port 8080, we can open a separate terminal
-session to test the endpoint using `curl`.
+After the application is started and it launches the embedded web server on port 8080, we can open a separate 
+terminal session to test the endpoint using `curl`.
 
 Running:
 ```bash
@@ -368,10 +368,43 @@ Should output:
 {"status":"ok","service":"legacy-service"}
 ```
 
-If you can't open a separate terminal, we can alternatively start the application in the background by adding `&` to the end
-of the command:
+If you can't open a separate terminal, we can alternatively start the application in the background by adding `&` 
+to the end of the command:
 ```bash
 java -jar target/*.jar &
+```
+
+Up until this point, we have a working legacy workload to migrate. The application and internal dependencies piece
+is basically done. Before continuing, let's make a few small configuration adjustments to better align the application 
+with production-style operations. Specifically, we will explicitly define the server port and enable health endpoints
+for observability.
+
+In `src/main/resources/application.properties`, add:
+```properties
+server.port=8080
+management.endpoints.web.exposure.include=health,info
+management.endpoint.health.show-details=always
+management.endpoints.health.probes.enabled=true
+management.health.jms.enabled=false
+```
+These properties ensure:
+- The application explicitly listens on port `8080`
+- The Actuator health endpoint is exposed over HTTP
+- Liveness and readiness probe endpoints are enabled
+- Unused health indicators (such as JMS) are disabled to avoid 
+  unnecessary noise or false reads from the other health probes.
+
+This will give us:
+- `/actuator/health`
+- `/actuator/health/liveness`
+- `/actuator/health/readiness`
+Adding these Actuator endpoints is important to expose liveness and readiness endpoints so the runtime platform can determine container health. These endpoints will later be used by Docker and Kubernetes to verify container health and readiness without modifying the application code.
+
+For quick validation, we can run:
+```bash
+curl http://localhost:8080/actuator/health
+curl http://localhost:8080/actuator/health/liveness
+curl http://localhost:8080/actuator/health/readiness
 ```
 #### 1.4.4 Systemd Implementation
 
