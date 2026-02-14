@@ -408,7 +408,107 @@ curl http://localhost:8080/actuator/health/liveness
 curl http://localhost:8080/actuator/health/readiness
 ```
 #### 1.4.4 Systemd Implementation
+Running the application manually using `java -jar` requires a persistent terminal session and it doesn't survive 
+system reboots. To simulate a more realistic legacy operations model, let's convert the application into a 
+`systemd`-managed service.
 
+This allows the application to:
+- Start automatically
+- Restart on failure
+- Be managed using standard Linux service controls
+- Produce centralized logs via `journalctl`
+
+First, we need to create a non-login system user and a stable installation directory. This separates application
+execution from administrative accounts and resembles common production practices.
+```bash
+sudo useradd -r -s /usr/sbin/nologin legacyservice || true
+sudo mkdir -p /opt/legacy-service
+sudo chown -R legacyservice:legacyservice /opt/legacy-service
+```
+This is important because we avoid running the application as root, create a stable path independent of the build
+directory, and provide a cleaner operational separation.
+
+Now we can build the application from the project root directory and copy the resulting JAR to the stable 
+installation directory:
+```bash
+./mvnw package
+sudo cp target/*.jar /opt/legacy-service/app.jar
+sudo chown -R legacyservice:legacyservice /opt/legacy-service/app.jar
+```
+By using a fixed name like `app.jar`, we simplify service configurations and updates.
+
+Now we create the `systemd` unit file:
+```bash
+nano /etc/systemd/system/legacy-service.service
+```
+```ini
+[Unit]
+Description=Legacy Spring Boot Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=legacyservice
+Group=legacyservice
+WorkingDirectory=/opt/legacy-service
+ExecStart=/usr/bin/java -jar /opt/legacy-service/app.jar
+Restart=on-failure
+RestartSec=3
+SuccessExitStatus=143
+
+# Optional hardening (safe defaults)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
+```
+This configuration ensures the service runs under a dedicated user, restarts on failure, and integrates with
+the system's boot process.
+
+Let's enable and start the service:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl start legacy-service
+sudo systemctl enable legacy-service
+```
+Validate service operations:
+```bash
+curl http://localhost:8080/hello
+curl http://localhost:8080/actuator/health
+sudo journalctl -u legacy-service -f
+```
+At this stage, the application behaves like a traditional Linux-managed service and survives reboots.
+
+If we needed to update the application, in the cases where code changes are made, we need to rebuild 
+and redeploy the artifact, then restart the service:
+```bash
+./mvnw package
+sudo cp target/*.jar /opt/legacy-service/app.jar
+sudo chown legacyservice:legacyservice /opt/legacy-service/app.jar
+sudo systemctl restart legacy-service
+```
+This process highlights the manual nature of legacy deployments: artifact replacement followed by a 
+service restart.
+
+While this approach improves reliability compared to manual execution, build, deployment, and runtime, 
+responsibilities remain tightly dependent to the host. This limitation motivates the introduction of containerization
+and CI in the next phase of migration. 
+
+**Troubleshooting: Port Conflicts**  
+If the service fails to start and logs indicate that port `8080` is already in use, another process is bound to
+the same port.
+We can resolve this issue as follows:
+```bash
+sudo systemctl stop legacy-service
+sudo lsof -i :8080
+sudo kill -9 <PID>
+sudo systemctl start legacy-service
+sudo systemctl status legacy-service --no-pager
+```
 ### 1.5 Validate the application is running
 
 ## 2. External Dependency: PostgreSQL
