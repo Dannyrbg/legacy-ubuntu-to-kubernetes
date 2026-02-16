@@ -503,12 +503,244 @@ sudo systemctl start legacy-service
 sudo systemctl status legacy-service --no-pager
 ```
 ## 2. External Dependency: PostgreSQL
-### 2.1 Create the PostgreSQL host (or service)
-### 2.2 Install PostgreSQL
-### 2.3 Create database + user
-### 2.4 Configure network access (listen_addresses, firewall, pg_hba.conf)
-### 2.5 Configure the Spring Boot connection settings
-### 2.6 Validate connectivity end-to-end
+The legacy application currently operates without a persistent data store. To better simulate a realistic enterprise workload, we will introduce PostgreSQL as an external database dependency. This change requires both application-level updates and database environment setup.
+### 2.1 Update Application Dependencies
+In order to support database connectivity and persistence, the following dependencies are added to the project's `pom.xml` file:
+```xml
+<!-- Data + ORM -->
+<dependency>
+		<groupId>org.springframework.boot</groupId>
+		<artifactId>spring-boot-starter-data-jpa</artifactId>
+</dependency>
+
+<!-- PostgreSQL JDBC driver -->
+<dependency>
+		<groupId>org.postgresql</groupId>
+		<artifactId>postgresql</artifactId>
+		<scope>runtime</scope>
+</dependency>
+
+<!-- Database Migrations -->
+<dependency>
+		<groupId>org.flywaydb</groupId>
+		<artifactId>flyway-core</artifactId>
+</dependency>
+
+<!-- In-memory DB for tests -->
+<dependency>
+		<groupId>com.h2database</groupId>
+		<artifactId>h2</artifactId>
+		<scope>test</scope>
+</dependency>
+```
+We added these dependencies for the following reasons:
+- **Spring Data JPA:** Enables ORM-based (Object Relational Mapping) persistence.
+- **PostgreSQL driver:** Allows runtime connectivity to PostgreSQL.
+- **Flyway:** Manages database migrations schema
+- **H2 (test scope):** Allows unit tests to run without requiring a live PostgreSQL instance.
+#### Handling Spring Boot Auto-Configuration
+After adding the JPA and Flyway dependencies, Spring Boot will attempt to auto-configure a `DataSource` during the application's startup. Since a database has not yet been provisioned, startup will fail with an error similar to:
+	`Failure to determine a suitable driver class`
+This occurs because:
+- JPA triggers `DataSource` auto-configuration.
+- Flyway attempts to initialize database migrations.
+- No `spring.datasource.*` properties have been defined yet.
+Either way, the default `contextLoads()` test now requires a database configuration, and one hasn't been provided yet.
+
+While the PostgreSQL infrastructure is being provisioned, let's temporarily disable auto-configuration until PostgreSQL is provisioned. Let's add the following to our `application.properties` file in our legacy project:
+```properties
+spring.autoconfigure.exclude=\
+org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration,\
+org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration,\
+org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration
+```
+This allows the application to continue running while infrastructure configuration proceeds. Once PostgreSQL is available, these exclusions will be removed and proper connection settings will be configured.
+After adding the exclusions, we can rebuild and redeploy the application:
+```bash
+./mvnw package
+sudo cp target/*.jar /opt/legacy-service/app.jar
+sudo systemctl restart legacy-service
+```
+### 2.2 Create the PostgreSQL host (or service)
+
+To simulate a realistic external dependency boundary, PostgreSQL is going to be hosted on a dedicated Virtual Machine separate from the legacy application host.
+
+Let's provision a new Ubuntu 22.04 server VM in our local Proxmox environment with:
+- 8 GB RAM
+- ~50 GB storage
+- Private network connectivity within the lab subnet
+Adding this separation reflects traditional multi-tier application deployments, where application services and stateful dependencies reside on separate hosts.
+
+**Configure Static Network Addressing**
+
+To ensure stable connectivity between the legacy application and its external dependency, let's assign a static IP address to the PostgreSQL host.
+
+Relying on DHCP for stateful infrastructure can introduce unnecessary instability if addresses change. Implementing static addressing in this instance more closely mirrors common production environments where application servers reference database endpoints via fixed network identifiers (i.e. fixed IP addresses).
+
+The network configuration was updated via Netplan, which on our server exists in `/etc/netplan/50-cloud-init.yaml`:
+```yaml
+network:
+    ethernets:
+        ens18:
+            dhcp4: no
+            addresses:
+              - 192.168.10.50/24 # Assign whichever static IP you wish to use
+            routes:
+              - to: default
+                via: 192.168.10.1
+            nameservers:
+              addresses:
+                - 1.1.1.1
+                - 8.8.8.8
+    version: 2
+```
+Now, let's apply the configuration:
+```bash
+sudo netplan apply
+```
+Now let's validate and verify it went into effect and is working properly:
+```bash
+ip a show ens18
+ip route
+ping -c 3 192.168.10.1
+ping -c 3 8.8.8.8
+```
+
+Since the VM was provisioned using `cloud-init`, the default Netplan file may be regenerated on reboot. In order to prevent network configuration from being overwritten, we need to disable `cloud-init` network management.
+
+In `/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg`, add:
+	`network: {config: disabled}`
+
+Reboot and verify that the static configuration persists.
+
+Before installing application dependencies, let's apply basic host hardening. Let's install the Uncomplicated Firewall (UFW) and configure it to allow secure administrative access via SSH:
+```bash
+sudo apt install -y ufw
+sudo ufw allow OpenSSH
+sudo ufw enable
+sudo ufw status
+```
+### 2.3 Install PostgreSQL
+
+PostgreSQL is installed on the dedicated dependency VM using the official Ubuntu package repositories. Ubuntu 22.04 ships with PostgreSQL 14 by default, which provides modern authentication support (SCRAM-SHA-256) and long-term stability. After updating the package index (`sudo apt update`), let's install PostgreSQL and Contrib packages:
+```bash
+sudo apt install -y postgresql postgresql-contrib
+```
+Here, `postgresql` is the core database server, while `postgresql-contrib` includes additional utilities and extensions.
+We can verify installation and version by running:
+```bash
+psql --version
+```
+We should see it output version 14.x. This confirms installation.
+
+Ubuntu installs PostgreSQL as a `systemd`-managed service. Let's configure `postgresql` to start immediately and on boot, and then verify the service status:
+```bash
+sudo systemctl enable --now postgresql
+sudo systemctl status postgresql --no-pager
+```
+We should expect to see this as the service status: `Active: active (running)`
+
+Before we enable remote access, let's confirm default behavior:
+```bash
+ss -lntp | grep 5432
+```
+We should see: `127.0.0.1:5432`
+
+By default, PostgreSQL only listens on the loopback interface (`127.0.0.1`), preventing remote access until explicitly configured. Now we've confirmed that PostgreSQL is running and is currently restricted to local connections.
+
+Ubuntu manages PostgreSQL instances as "clusters." Ubuntu initializes a default PostgreSQL cluster during installation. Additional databases are created within this cluster.
+We can check by running:
+```bash
+sudo -u postgres psql -c "\l"
+```
+This lists databases. We should see the following default databases:
+- `postgres`
+- `template0`
+- `template1`
+
+The data directory for the default cluster lives in: `/var/lib/postgresql/14/main`
+### 2.4 Create Database & User
+
+Rather than using the default `postgres` superuser account, let's create a dedicated database and role for the application. This follows the principle of least privilege and isolates application access from administrative control.
+
+The `postgres` system account owns the PostgreSQL service and is used for database administrative tasks. Let's switch to the `postgres` user:
+```bash
+sudo -i -u postgres
+```
+We can now create an application role:
+```bash
+createuser legacyuser --pwprompt
+```
+This creates a new database role named `legacyuser`. The `--pwprompt` flag ensures a password is set during creation.
+This sets us up to create the application database:
+```bash
+createdb legacydb -O legacyuser
+```
+The database `legacydb` is created and ownership is assigned to `legacyuser`, ensuring the application user has full control over its own database while remaining isolated from other databases. If we want to quickly verify that `legacyuser` and `legacydb` exist and ownership is correct, we can perform the following:
+```ruby
+psql
+\du
+\l
+# quit
+\q
+```
+### 2.5 Configure Network Access (listen_addresses, firewall, pg_hba.conf)
+
+As we already previously addressed, by default, PostgreSQL on Ubuntu is configured for local-only access. Since the legacy application runs on a separate VM, PostgreSQL must be explicitly configured to accept and authorize remote TCP connections.
+
+PostgreSQL access control happens in two layers:
+1. **Network-level Listening (**`listen_addresses`**):** whether PostgreSQL accepts TCP connections on an interface at all.
+2. **Client Authentication (**`pg_hba.conf`**):** which users/databases are allowed to connect, from where, and using what authentication method.
+
+#### Enable Network Listening
+Let's begin by enabling network listening. We need to edit the PostgreSQL configuration file: `/etc/postgresql/14/main/postgresql.conf`
+Update (or uncomment) the following setting:
+	`listen_addresses = '*'`
+This allows PostgreSQL to listen on all network interfaces. A more restrictive option would be to bind only to the VM's private IP (e.g. `192.168.10.50`), but let's use `*` for this lab for simplicity and to avoid issues if the interface address changes.
+After this is done, let's restart PostgreSQL and verify that it is listening on port 5432:
+```bash
+sudo systemctl restart postgresql
+ss -lntp | grep 5432
+```
+The expected output should match `0.0.0.0:5432` (IPv4), which confirms PostgreSQL is accepting TCP connections.
+If we wish to additionally confirm the interface name, subnet, and default gateway before applying authentication rules, we can. It's optional, but good for clarity:
+```bash
+ip a show ens18
+ip route | head
+```
+
+#### Configure Client Authentication
+At this point PostgreSQL may accept TCP connections, but clients will still be rejected unless they match an authentication rule in `pg_hba.conf`. In `/etc/postgresql/14/main/pg_hba.conf`, add the following rule near the bottom, above any generic `host all all ...` rules:
+```conf
+host    legacydb     legacyuser     192.168.10.0/24     scram-sha-256
+```
+This rule allows the application user `legacyuser` to connect to the database `legacydb` from hosts in the `192.168.10.0/24` subnet using SCRAM-SHA-256 password authentication.
+
+Additionally, to ensure new passwords are stored using SCRAM hashes, confirm the following setting in `postgresql.conf`:
+	`password_encryption = scram-sha-256`
+Now we need to restart PostgreSQL to apply changes:
+```bash
+sudo systemctl restart postgresql
+```
+
+#### Open Firewall Access
+Finally, we need to allow PostgreSQL traffic through the host firewall:
+```bash
+# Better option
+sudo ufw allow from 192.168.10.0/24 to any port 5432 proto tcp
+
+# Simple, but less secure
+sudo ufw allow 5432/tcp
+```
+Then verify rules:
+```bash
+sudo ufw status
+```
+
+With listening, authentication rules, and firewall access configured, PostgreSQL can now be consumed as a true external dependency by the legacy application over the network.
+### 2.6 Configure the Spring Boot connection settings
+
+### 2.7 Validate connectivity end-to-end
 
 
 ---
