@@ -561,7 +561,7 @@ After adding the exclusions, we can rebuild and redeploy the application:
 sudo cp target/*.jar /opt/legacy-service/app.jar
 sudo systemctl restart legacy-service
 ```
-### 2.2 Create the PostgreSQL host (or service)
+### 2.2 Create the PostgreSQL Host
 
 To simulate a realistic external dependency boundary, PostgreSQL is going to be hosted on a dedicated Virtual Machine separate from the legacy application host.
 
@@ -738,11 +738,220 @@ sudo ufw status
 ```
 
 With listening, authentication rules, and firewall access configured, PostgreSQL can now be consumed as a true external dependency by the legacy application over the network.
-### 2.6 Configure the Spring Boot connection settings
+### 2.6 Configure the Spring Boot Connection Settings
 
-### 2.7 Validate connectivity end-to-end
+Before integrating PostgreSQL with the application, we should validate connectivity directly from the legacy application VM using the PostgreSQL client tools. Let's install the PostgreSQL Client on the legacy application VM:
+```bash
+sudo apt update
+sudo apt install postgresql-client -y
+```
+We can then test the remote connection:
+```bash
+# Replace host IP with your PostgreSQL VM's IP
+psql "host=192.168.10.50 dbname=legacydb user=legacyuser" -c "select now();"
+```
+After entering the password, a timestamp should be returned.
+If it executes successfully, we can confidently confirm:
+- Network connectivity between VMs
+- Firewall configuration
+- `listen_addresses` configuration
+- `pg_hba.conf` authentication rules
+- Valid database credentials
+At this stage, PostgreSQL is functioning as an external dependency.
 
+With infrastructure validated, we can now configure the application to use PostgreSQL as its primary data source.
+We need to edit our `application.properties` file in our legacy project. Let's add the following to the file:
+```properties
+spring.datasource.url=jdbc:postgresql://192.168.10.50:5432/legacydb
+spring.datasource.username=legacyuser
+spring.datasource.password={legacyuser_password}
+```
+Earlier, we disabled database auto-configuration to allow incremental setup. Now that PostgreSQL is available, let's remove:
+	`spring.autoconfigure.exclude=...`
+This allows Spring Boot to create:
+- DataSource
+- EntityManager
+- TransactionManager
+- Flyway migrations (if configured)
 
+### 2.7 Implement Minimal Persistence Feature
+
+To validate that PostgreSQL is not only reachable but fully integrated into the application runtime, let's implement a minimal database-backend feature.
+
+This feature will verify:
+- JDBC connectivity
+- Spring Data JPA configuration
+- Entity mapping
+- Transaction management
+- Write and read operations
+
+Rather than introducing complex domain logic, adding a simple persistence model to confirm that the application can create and retrieve records from the database is sufficient.
+#### Entity Layer
+Let's first create the entity layer. In our project's `service` directory, create a new directory called `model` and create a new file to it called `PingRecord.java`. Add the following to the file:
+```java
+package com.lab.legacy.legacy.service.model;
+
+import jakarta.persistence.*;
+import java.time.Instant;
+
+@Entity
+public class PingRecord {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    private Instant createdAt = Instant.now();
+
+    public Long getId() { return id; }
+    public Instant getCreatedAt() { return createdAt; }
+}
+```
+The `PingRecord` entity represents a minimal table with:
+- A generated primary key
+- A timestamp field initialized at creation
+
+The `GenerationType.IDENTITY` strategy delegates ID generation to the database, confirming that PostgreSQL is actively participating in the persistence lifecycle.
+#### Repository Layer
+Now let's add the repository layer. Create a new directory within the same `service` directory called `repo`. Create a file called `PingRecordRepository.java` and add the following to it:
+```java
+package com.lab.legacy.legacy.service.repo;
+
+import com.lab.legacy.legacy.service.model.PingRecord;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface PingRecordRepository extends JpaRepository<PingRecord, Long> {}
+```
+The repository extends `JpaRepository`, providing:
+- Save operations
+- Count queries
+- CRUD behavior
+- Transactional boundaries managed by Spring
+
+Spring Boot automatically scans for JPA repositories within the same package hierarchy as the main application class. Because the repository resides under the root package, no additional configuration should be required. If it isn't detecting our repository, repository scanning can be explicitly enabled to ensure detection of the JPA repository package. In our `service/LegacyServiceApplication.java` file, add the line highlighted:
+```java
+...
+@SpringBootApplication
+-> @EnableJpaRepositories(basePackages = "com.lab.legacy.legacy.service.repo") <-
+public class LegacyServiceApplication {
+...
+```
+#### Controller Layer
+Lastly, let's add the Controller Layer. In our `controller` directory, we can create a file called `DbPingController.java` and add the following to it:
+```java
+package com.lab.legacy.legacy.service.controller;
+
+import com.lab.legacy.legacy.service.model.PingRecord;
+import com.lab.legacy.legacy.service.repo.PingRecordRepository;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.util.Map;
+
+@RestController
+public class DbPingController {
+
+        private final PingRecordRepository repo;
+
+        public DbPingController(PingRecordRepository repo) {
+                this.repo = repo;
+        }
+
+        @GetMapping("/db/ping")
+        public Map<String, Object> pingDb() {
+                PingRecord saved = repo.save(new PingRecord());
+                long count = repo.count();
+                return Map.of(
+                        "savedId", saved.getId(),
+                        "totalRows", count
+                );
+        }
+}
+```
+The `/db/ping` endpoint performs two operations:
+1. Persists a new `PingRecord` entity.
+2. Queries the total number of rows in the table.
+
+Each request results in:
+- A database insert
+- A database count query
+- A returned JSON payload confirming both operations
+
+A successful response confirms:
+- The application can establish a JDBC connection.
+- Authentication credentials are valid.
+- The schema exists or is being generated correctly.
+- Hibernate can map entities to database tables.
+- Transactions are committed successfully.
+- The database is reachable over the network.
+
+An successful response should match:
+```JSON
+{
+  "savedId": 5,
+  "totalRows": 5
+}
+```
+
+If `totalRows` increases with each request, this confirms persistent state across requests and verifies PostgreSQL is functioning as a durable, external data store.
+
+### 2.8 Validate connectivity end-to-end
+
+Let's rebuild and redeploy the application:
+```bash
+./mvnw package
+sudo cp target/*.jar /opt/legacy-service/app.jar
+sudo systemctl restart legacy-service
+```
+Test:
+```bash
+curl http://localhost:8080/db/ping
+```
+We should notice the following if it executes successfully:
+- `savedID` increments
+- `totalRows` increases with each call
+
+If no issues arise, we can confirm the following:
+- Network-level connectivity
+- Application-level DB integration
+- ORM and JPA functionality
+- Successful write and read cycle
+#### Improve Local Security 
+Storing database credentials in plaintext reflects traditional legacy deployments. However, credential handling evolves across deployment models:
+
+| Stage      | How password is handled              |
+| ---------- | ------------------------------------ |
+| Legacy VM  | `application.properties` (plaintext) |
+| systemd    | ENV vars                             |
+| Docker     | ENV vars                             |
+| Kubernetes | Secretes                             |
+| Cloud      | External Secret Manager              |
+Since at the moment we're storing our `spring.datasource.password` in `application.properties` in plaintext, we create several risks. Let's begin by restricting file permissions to protect secrets at rest on disk:
+```bash
+sudo chown legacyservice:legacyservice src/main/resources/application.properties
+sudo chmod 600 src/main/resources/application.properties
+```
+While this is a defensive approach, it isn't a modern approach and doesn't scale across environments. Instead of storing the password directly in the file, let's use environment variables. Spring Boot automatically resolve `${...}` placeholders from:
+- Environment variables
+- JVM system properties
+- OS-level environment
+
+Now let's have `systemd` set the environment variables when the process starts, where the app reads it automatically.
+In our unit file, add:
+```ini
+Environment=DB_PASSWORD={legacyuser_password}
+```
+Then reload:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart legacy-service
+```
+
+This is overall a better approach and are complementary steps that secure the application. Here's what improved:
+- The password is not stored in the app config file.
+- It can differ per environment (dev, staging, prod).
+- It can be injected at runtime.
+- The application code does not change.
 ---
 # Migration Strategy
 
