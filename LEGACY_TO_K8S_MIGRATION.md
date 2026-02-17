@@ -926,6 +926,7 @@ Storing database credentials in plaintext reflects traditional legacy deployment
 | Docker     | ENV vars                             |
 | Kubernetes | Secretes                             |
 | Cloud      | External Secret Manager              |
+
 Since at the moment we're storing our `spring.datasource.password` in `application.properties` in plaintext, we create several risks. Let's begin by restricting file permissions to protect secrets at rest on disk:
 ```bash
 sudo chown legacyservice:legacyservice src/main/resources/application.properties
