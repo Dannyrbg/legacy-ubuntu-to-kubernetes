@@ -954,17 +954,24 @@ This is overall a better approach and are complementary steps that secure the ap
 - It can be injected at runtime.
 - The application code does not change.
 ---
-# Migration Strategy
+# Modernization Implementation
+
+## Jenkins VM
 
 **Status:** *Completed. Missing polished documentation*
 
 ---
-# CI & Platform Implementation
+## ECR & IAM
 
 **Status:** *Completed. Missing polished documentation*
 
 ---
-# Kubernetes Implementation
+## Jenkins Pipeline
+
+**Status:** *Completed. Missing polished documentation*
+
+---
+## Platform VM & EKS
 
 **Status:** *Completed. Missing polished documentation*
 
