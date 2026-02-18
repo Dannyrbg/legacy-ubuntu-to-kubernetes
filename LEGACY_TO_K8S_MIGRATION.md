@@ -1697,7 +1697,245 @@ We encountered a Maven build failure in Jenkins due to a Java toolchain mismatch
 ---
 ## Platform VM & EKS
 
-**Status:** *Completed. Missing polished documentation*
+### Amazon EKS Cluster Creation
+
+With the CI pipeline producing versioned container images in Amazon ECR, the next step is provisioning a managed Kubernetes control plane using Amazon Elastic Kubernetes Service (EKS).
+
+EKS provides:
+- A managed Kubernetes control plane
+- High availability across multiple Availability Zones
+- Automatic patching and upgrades of the control plane
+- Native integration with AWS networking and IAM
+
+EKS was chosen over self-managed Kubernetes to eliminate control plane maintenance overhead and focus the lab on workload migration and CI automation rather than cluster lifecycle management.
+
+Let's create our cluster by navigating to *EKS* in our AWS console. For our lab, let's select: *Quick configuration (EKS Auto Mode)*
+We choose this option because our objective in this lab is validating:
+- CI → ECR → EKS workflow
+- Pod scheduling
+- Health checks
+- Network connectivity
+- Deployment mechanics
+We're not delving into custom VPC design, custom node groups, or deep cluster networking tuning. Using "Quick configuration" provides a managed control plane, managed node provisioning, sensible defaults, and mutli-AZ setup. This design choice accelerates platform validation without overengineering our infrastructure.
+
+We can choose any Cluster Name we see fit, but this lab opted for the default auto-generated name `hilarious-dubstep-goose`. We want to have Kubernetes Version 1.34, which was the latest stable version available at the time of creation. This way, we:
+- Avoid deprecated APIs
+- Ensure compatibility
+- Align with long-term support windows
+
+For our Cluster IAM Roles, we're concerned with two:
+- Cluster IAM Role: `AmazonEKSClusterRole`
+- Node IAM Role `AmazonEKSAutoNodeRole`
+
+Both these IAM roles are created by selecting "Create recommended role".
+
+Selecting `AmazonEKSClusterRole` as our Cluster IAM role allows the control plane to:
+- Manage networking resources
+- Attach ENIs (Elastic Network Interfaces)
+- Interact with AWS APIs
+This role is assumed by the EKS service itself.
+
+Our Node IAM role, `AmazonEKSAutoNodeRole`, is attached to EC2 worker nodes and allows them to:
+- Register with the Cluster
+- Pull container images from ECR
+- Write logs to CloudWatch
+- Communicate with AWS APIs
+Without this role, nodes cannot join and pods cannot pull private images. This is vital for ECR-based deployments.
+
+For our VPC, we'll be using the default VPC. This implies:
+- Public subnets
+- Internet Gateway attached
+- Outbound NAT already configured
+
+For our subnets, multiple public subnets across availability zones were selected. This is important because:
+- Control plane ENIs are distributed across AZs
+- Worker nodes are distributed for HA
+- Pods can schedule across multiple AZs
+
+In production, we would use private subnets and nodes would sit behind NAT, restricting our public exposure. For the sake of this lab, public subnets simplify connectivity and reduce networking friction.
+
+When we click *Create*, AWS provisions:
+1. Managed Kubernetes control plane
+2. Elastic Network Interfaces (ENIs)
+3. Security groups
+4. Managed node infrastructure
+5. Cluster endpoint
+6. IAM integration
+This typically takes around ten to fifteen minutes. We can validate our Cluster once the status becomes `Active`. From here on, we're prepared to generate `kubeconfig` on our Platform VM, which is discussed in the following subsection.
+
+### Platform VM & kubectl Configuration
+
+To mirror real-world platform operations, we'll provision a dedicated "control workstation" in our local Proxmox environment. This VM is not part of the application runtime or CI system. It exists solely to administer the Kubernetes cluster.
+
+This separation reflects common production patterns where:
+- CI systems build artifacts
+- Clusters run workloads
+- Operators manage infrastructure from a separate environment
+
+Let's begin by creating the Platform VM. We'll use a new Ubuntu 22.04 VM with:
+- 2 CPU cores
+- 2-4 GB RAM
+- 30-40 GB disk
+The VM must have outbound internet access (to AWS endpoints) and the ability to reach the EKS API endpoint. No inbound public exposure is required.
+
+After the Platform VM has undergone basic configuration, let's install the required tooling.
+
+We need to install `kubectl`. It's easiest using `snap`:
+```bash
+sudo snap install kubectl --classic
+kubectl version --client
+```
+`kubectl` minor version should match or be within one minor version of the Cluster version.
+
+`kubectl` is a Kubernetes client. It does not run inside the Cluster and does not host workloads. It simply communicates with the Kubernetes API server. It can run anywhere that has network access to the Cluster endpoint, valid authentication credentials, and a properly `kubeconfig` file.
+
+For EKS specifically, authentication is handled via AWS IAM and authorization is mapped to Kubernetes RBAC (Role-Based Access Control).
+
+We need to additionally install `AWS CLI v2`, since EKS relies on AWS CLI to generate `kubeconfig`, inject an IAM-based authentication plugin, and retrieve temporary tokens.
+```bash
+# Download AWS CLI v2 installer
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+
+# Extract installer
+unzip -q awscliv2.zip
+
+# Install AWS CLI v2
+sudo ./aws/install
+
+# Verify installation
+aws --version
+```
+
+In the case that the Cluster was created in the AWS console under a different identity (i.e. root), let's create a new IAM user to administer the cluster from the platform VM.
+
+Create `eks-admin` IAM user
+- Attach policies directly
+- Check *AdministratorAccess*
+- Create user
+- Create Access Keys (CLI use case) and store safely
+In a production environment, this would be replaced with a scoped role and short-lived credentials. For lab validation, administrative privileges simplify access control.
+
+We can now configure AWS credentials on the platform VM and verify identity:
+```bash
+aws configure
+# Input all appropriate credential info for eks-admin IAM user
+aws sts get-caller-identity
+```
+This confirms that the credentials are valid, AWS API calls succeed, and our IAM identity is active.
+
+Let's proceed by generating our local cluster access configuration (generating `kubeconfig` for EKS):
+```bash
+aws eks update-kubeconfig --region us-east-1 --name hilarious-dubstep-goose
+```
+This command fetches our cluster endpoint, retrieves certificate authority data, writes configuration to `~/.kube/config` and injects an authentication exec plugin.
+
+If we now try to validate our Cluster connectivity by running
+```bash
+kubectl get nodes
+```
+
+We'll notice it won't potentially work because we created the Cluster before `eks-admin`, meaning we created the Cluster with root.
+- EKS gave cluster-admin to the identity that created the cluster, in this case root, and our new `eks-admin` user isn’t authorized yet, so `kubectl` gets “provide credentials”.
+- On VM, get our `eks-admin` ARN with: `aws sts get-caller-identity`. Copy the ARN.
+- Navigate to *AWS Console -> EKS -> Clusters -> `hilarious-dubstep-goose` -> Access -> Access entries -> Create access entry*
+	- Principal: paste the `eks-admin` ARN
+	- Type: Standard IAM access entry
+	- Access policies: attach *AmazonEKSClusterAdminPolicy*
+		- Scope: Cluster
+- What this does:
+	- Maps your IAM user (`eks-admin`) to Kubernetes RBAC cluster-admin without touching `aws-auth` manually.
+
+Now if we update `kubeconfig` and retry validating our Cluster connectivity:
+```bash
+aws eks update-kubeconfig --region us-east-1 --name hilarious-dubstep-goose
+kubectl get nodes
+```
+We should see our expected output as:
+- Worker nodes listed
+- STATUS: Ready
+- Kubernetes version displayed
+
+This confirms:
+- IAM authentication works
+- EKS RBAC mapping works
+- Networking is functional
+- `kubeconfig` is valid
+
+**Deploy ECR Image into EKS**  
+1. Set variables:
+```bash
+export NS=legacy
+export APP=legacy-app
+export IMAGE="<ECR_IMAGE_URI_WITH_TAG>"
+```
+
+2. Create namespace and service account
+```bash
+kubectl create namespace $NS --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n $NS create serviceaccount ${APP}-sa --dry-run=client -o yaml | kubectl apply -f -
+```
+
+3. Create our YAML file: *legacy-app.yaml*
+- Enter the following into the file and replace the image line with our real ECR image URI and tag:
+```YAML
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: legacy-app
+  namespace: legacy
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: legacy-app
+  template:
+    metadata:
+      labels:
+        app: legacy-app
+    spec:
+      serviceAccountName: legacy-app-sa
+      containers:
+        - name: legacy-app
+          image: <Account-ID>.dkr.ecr.us-east-1.amazonaws.com/springboot-legacy-app:<Image-Tag>
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: legacy-app-svc
+  namespace: legacy
+spec:
+  selector:
+    app: legacy-app
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+  type: ClusterIP
+```
+
+4. Apply the manifest: `kubectl apply -f legacy-app.yaml`
+	- Expected output:
+```bash
+deployment.apps/legacy-app created
+service/legacy-app-svc created
+```
+
+5. Watch the pods: `kubectl -n legacy get pods -w`
 
 ---
 # External Dependency Integration (PostgreSQL / RDS)
