@@ -1624,8 +1624,8 @@ This error occurred despite Jenkins reporting Java 21 as the active runtime. The
 
 **Diagnostic:**  
 There were contradicting signals:
-- `java --version` → OpenJDK 21 ✅
-- `mvn --version` → Java 21 runtime ✅
+- `java --version` → OpenJDK 21 (good)
+- `mvn --version` → Java 21 runtime (good)
 - Maven compiler configured with `--release 17` (valid)
 - Yet compilation failed with “release version 17 not supported”
 This suggests it was a toolchain inconsistency rather than a code issue.
