@@ -1081,7 +1081,205 @@ These plugins enable the following workflow:
 ---
 ## ECR & IAM
 
-**Status:** *Completed. Missing polished documentation*
+### ECR
+
+With the CI established, the next architectural component we're going to introduce is a container registry. Amazon Elastic Container Registry (ECR) serves as the artifact boundary between the build system (Jenkins) and the runtime platform (Kubernetes).
+
+**Why Introduce a Container Registry?**
+Up until this point, builds produced artifacts that were:
+- Stored locally
+- Manually transferred
+- Tied to specific hosts
+That model doesn't scale. By introducing ECR, it's able to provide:
+- Centralized image storage
+- Versioned artifacts
+- Immutable deployment units
+- Separation between build and runtime environments
+- A pull-based deployment model for Kubernetes
+The main point here is, the container registry decouples artifact production from artifact consumption.
+
+**Repository Creation**
+Let's create an ECR repository with the following configuration:
+- Visibility: Private
+- Repository name: `springboot-legacy-app`
+- Region: `us-east-1`
+- Image tag mutability: Mutable
+- Encryption: AES-256 (default)
+
+The repository is private to prevent public access to application images. Container images often contain application binaries and internal configuration that should not be publicly accessible. Furthermore, the repository region must align with the Kubernetes cluster region to avoid cross-region image pulls, which introduce latency and complexity.
+
+**Repository URI**
+After creation, AWS generates a repository URI:
+`<ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/springboot-legacy-app`
+This URI becomes:
+- The Docker image tag prefix
+- The reference used in our Jenkins pipeline
+- The image reference in Kubernetes manifests
+The repository URI becomes the official artifact reference for all deployment stages.
+
+**Image Tag Strategy**
+Images will be tagged with version identifiers (e.g. build number) to allow deterministic deployments. Tag mutability was enabled for simplicity in our lab environment. Typically, in production systems, immutable tag policies are preferred to prevent accidental overwrites of released artifacts.
+
+**Encryption**
+ECR images are encrypted at rest using AES-256 by default. This provides baseline protection for stored container layers.
+
+**Updated Architecture**
+At this stage, the architecture evolves from:
+`Legacy VM -> Local Artifact -> Manual Deployment`
+to:
+`Source Code -> Jenkins -> ECR -> Runtime Platform (EKS)`
+
+With ECR in place, the build system can now produce portable, versioned container artifacts that are independent of any specific host. The next step is granting Jenkins narrowly scoped permissions to authenticate and push images to this repository.
+### IAM
+
+With the container registry established, the next step is defining a secure identity boundary between the on-premises CI system and AWS. Rather than using human credentials or broad administrative access, let's create a dedicated machine identity specifically for Jenkins.
+
+Jenkins runs outside AWS (on a Proxmox VM), so it cannot assume an IAM role. Therefore, a dedicated IAM user is required to authenticate programmatically using access keys.
+This identity:
+- Represents the CI system only
+- Is isolated from human users
+- Has narrowly scoped permissions
+- Can be revoked independently
+
+**Create Machine User: `jenkins-ecr`**
+From the AWS console go to *IAM -> Users -> Create User*
+User Details:
+- Username: *jenkins-ecr*
+- Choose: *Attach Policies Directly*
+	- We don't want to pick any existing AWS managed policies yet. We're going to create our own next.
+After user creation, we're going to explicitly create the access key. In order to create the access key for Jenkins:
+1. Click the newly created user *jenkins-ecr*
+2. Go to the *Security Credentials* tab
+3. Scroll to *Access Keys*
+4. Click *Create access key*
+5. For the "Use case:" option, choose *Application running outside AWS*
+6. Then click next and create access key.
+The secret access key is only shown once during creation and must be stored securely. It should never be committed to source control or stored in plaintext.
+
+Rather than attaching broad AWS managed policies (e.g., AmazonEC2ContainerRegistryFullAccess), let's define a custom policy to allow only the minimum actions required for Docker image pushes.
+
+Up until this point, the user has no permissions yet and Jenkins cannot access ECR yet. This is done intentionally. We can now add the least-privilege policy next.
+
+*Policy Objectives*
+Jenkins must be able to:
+- Authenticate to ECR
+- Upload image layers to only our specific repo
+- Publish image manifests
+
+It must NOT be able to:
+- Delete repositories
+- Modify other repositories
+- Access EKS
+- Modify IAM
+- Access unrelated AWS services
+
+To create this policy, open IAM Policies: *AWS Console -> IAM -> Policies (left sidebar)* and select *Create policy*
+Click the JSON tab and delete all its contents. Write this into the JSON file:
+```JSON
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "ecr:GetAuthorizationToken",
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:InitiateLayerUpload",
+        "ecr:UploadLayerPart",
+        "ecr:CompleteLayerUpload",
+        "ecr:PutImage"
+      ],
+      "Resource": "arn:aws:ecr:us-east-1:<ACCOUNT_ID>:repository/springboot-legacy-app"
+    }
+  ]
+}
+```
+We set *Resource* to *\** for *GetAuthorizationToken* because AWS requires it since auth tokens are global, not repo-scoped.
+After clicking next, we can name the policy and provide a quick description:
+- *Name*: JenkinsECRPushPolicy
+- *Description:* Allow Jenkins to push Docker images to ECR repository springboot-legacy-app
+We can then officially create the policy.
+
+The policy is divided into two statements:
+1. `ecr:GetAuthorizationToken`:Required to obtain a temporary authentication token. This must use `"Resource": "*"` because ECR auth tokens are not repository-scoped.
+2. *Repository-scoped push actions:* These are restricted to a single repository ARN: springboot-legacy-app.
+
+
+Now let's attach the policy to our *IAM user*:
+1. Go back to *IAM -> Users*
+2. Click *jenkins-ecr*
+3. Go to the *Permissions* tab
+4. Click *Add permissions*
+5. Choose *Attach policies directly*
+6. Search for: *JenkinsECRPushPolicy*
+7. Check the box
+8. Click *Add permissions*
+
+We should now see two important things on our user's page:
+- *Permissions:* JenkinsECRPushPolicy
+- *Access keys:* 1
+
+The architecture now establishes a controlled trust relationship:
+```ascii
+The architecture now establishes a controlled trust relationship:
+
+Jenkins VM (external system)
+        ↓
+IAM User: jenkins-ecr (least privilege)
+        ↓
+ECR Repository: springboot-legacy-app
+```
+
+### Integrate Credentials into Jenkins
+
+To allow our Jenkins pipeline to authenticate to AWS, the IAM credentials need to be stored securely in the Jenkins credential store.
+
+Once logged in as the admin in Jenkins UI, go to *Manage Jenkins -> Credentials* and click on *Global* highlighted in blue in *Domains* under *System* in *Stores scoped to Jenkins*. Click *Add Credentials*.
+
+Fill in AWS credentials using the following values:
+- *Kind:* AWS Credentials
+- *Scope:* Global
+- *Access Key ID:* paste from `jenkins-ecr`
+- *Secret Access Key:* paste from `jenkins-ecr`
+- *ID:* aws-ecr
+- *Description:* IAM user for Jenkins to push images to ECR (us-east-1)
+Click *Create*. Now Jenkins securely stores the credentials.
+
+From the Jenkins VM terminal, we run `aws sts get-caller-identity` to see if IAM is wired correctly. I, however, received the following error:
+	`Unable to locate credentials. You can configure credentials by running "aws login".`
+The AWS CLI on the Jenkins VM operates independently from the Jenkins credential store. Therefore, CLI-level commands will fail unless credentials are configured for the underlying system user.
+
+Our best fix is configuring the credentials with `sudo -u jenkins aws configure`. It's not limiting, but it is a temporary, VM-local convenience. It's perfectly fine and acceptable for validation and early pipelines, but not the end state. Think of it as a "fall-back credential source." For our lab, it's totally okay since it:
+- Proves IAM policy correctness
+- Proves ECR access
+- Removes ambiguity (“is Jenkins broken or AWS broken?”)
+- Lets you run manual validation commands
+
+Let's configure AWS credentials as the `jenkins` user:
+Run: `sudo -u jenkins aws configure`
+Enter:
+- *AWS Access Key ID:* paste from `jenkins-ecr` user
+- *AWS Secret Access Key:* paste from `jenkins-ecr` user
+- *Default region name:* `us-east-1`
+- *Default output format:* `json`
+
+Let's test identity as `jenkins`:
+	`sudo -u jenkins aws sts get-caller-identity`
+It's expected output should be key-value pairs of `UserId`, `Account`, and `Arn`
+Now let's test our ECR login still as `jenkins`:
+```bash
+sudo -u jenkins aws ecr get-login-password --region us-east-1 | sudo -u jenkins docker login --username AWS \
+--password-stdin <ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com
+```
+The expected output is: `Login Succeeded`
+
+We've validated ECR access using the Jenkins service account before binding credentials in the pipeline.
+
+In production environments, static IAM access keys would ideally be replaced with IAM roles. Static access keys are used here because Jenkins is running outside AWS infrastructure.
 
 ---
 ## Jenkins Pipeline
