@@ -1284,7 +1284,415 @@ In production environments, static IAM access keys would ideally be replaced wit
 ---
 ## Jenkins Pipeline
 
-**Status:** *Completed. Missing polished documentation*
+With Jenkins integrated with ECR, the next step is defining a deterministic, repeatable CI pipeline that transforms source code into a versioned container artifact.
+
+The pipeline implements a three-stage workflow:
+1. Build (Maven)
+2. Dockerize (container image)
+3. Push (Amazon ECR)
+
+At this stage, Kubernetes deployment is intentionally excluded. The objective is to establish a stable artifact production pipeline before introducing orchestration. Since our code exists on the legacy VM, we'll make Jenkins pull the source from the legacy VM over SSH, then build and push to ECR. The best and most effective method to do that would be by having Jenkins use `git` on the legacy VM.
+
+### Application Configuration Sanitation
+
+Before creating and committing the repository, let's make sure we don't have any database credentials configured in plaintext within our project. Let's check `application.properties` in `~/src/main/resources/`.
+
+We see that it includes the PostgreSQL database username and URL in plaintext. Since it's a `systemd` service, we can follow the same steps we did earlier for the password to swap them for environment variables, so that it looks like:
+```properties
+spring.datasource.url=jdbc:postgresql:${DB_URL}
+spring.datasource.username=${DB_USER}
+spring.datasource.password=${DB_PASSWORD}
+```
+If we were to try running `git add .`, which we will do shortly, we'll receive an error like this:
+```bash
+error: open("src/main/resources/application.properties"): Permission denied
+error: unable to index file src/main/resources/application.properties
+fatal: adding files failed
+```
+Git is trying to read the `application.properties` file but the current user (admin in this case) doesn't have read permission on it. This happened because the file was created by the install script. If we check ownership, it'll look like this:
+	`-rw------- 1 legacyservice legacyservice 437 Feb  4 01:41 application.properties`
+	- This is a very common side-effect of `systemd`-managed applications. Our Spring Boot app was running as `User=legacyservice` in a `systemd` unit. So when the app, or startup script, created or modified the `application.properties` file, Linux correctly set the owner to `legacyservice:legacyservice`.
+	
+We can fix ownership and ensure it's readable by using `chown` and `chmod`:
+```bash
+sudo chown admin:admin src/main/resources/application.properties
+chmod 644 src/main/resources/application.properties
+```
+This way:
+- Runtime data = owned by service user (`legacyservice`)
+- Source code = owned by admin user
+Now if we check ownership, we'll see it's fixed and look like this:
+	`-rw-r--r-- 1 admin admin 437 Feb  4 01:41 application.properties`
+We can continue with using `git` now.
+
+### Source Control Integration (Git)
+
+To enable automated builds, we need to migrate the application source code to a private GitHub repository. This creates a formal boundary between development and CI execution. 
+
+We don't want to build from the legacy VM directly, as building from the legacy host would:
+- Preserve tight host coupling
+- Prevent version tracking
+- Limit CI scalability
+- Complicate rollback
+
+Introducing Git gives us:
+- Version history
+- Branching
+- Deterministic pipeline triggers
+- Traceable build metadata
+
+**GitHub Repository Setup**  
+Let's create a new GitHub repository with these options:
+- Repository: `legacy-service`
+- Visibility: Private
+- Branch: `main`
+SSH-based authentication is configured for both:
+- Legacy VM (for pushing code)
+- Jenkins VM (for pulling code)
+This way, we can avoid storing GitHub password or tokens.
+
+**Secure SSH Integration**  
+We need generate an SSH key to serve as the legacy VM's cryptographic identity (unless you already have one you can use) so that GitHub knows that the machine is allowed to act as us. We need to run `ssh-keygen` on the legacy VM:
+```bash
+ssh-keygen -t ed25519 -C "legacy-vm"
+```
+Press `Enter` for the pop-up prompts for default behavior. Then `cat` the new SSH key in *~/.ssh* and copy the entire line as outputted.
+Take that entire line and create a new SSH key in GitHub by navigating to: 
+	*GitHub -> Settings -> SSH and GPG Keys -> New SSH key*
+Paste the copied output from `ed25519` and save it.
+
+We can test it by running `ssh -T git@github.com` on the legacy-VM. If the output matches: `Hi {username}! You've successfully authenticated...`, then we're golden.
+
+We also need to make Jenkins be able to clone our private repository. On the Jenkins VM, generate an SSH key for the `jenkins` user and copy the entire output after catting it:
+```bash
+sudo -u jenkins ssh-keygen -t ed25519 -N "" -f /var/lib/jenkins/.ssh/id_ed25519
+sudo -u jenkins cat /var/lib/jenkins/.ssh/id_ed25519.pub
+```
+Add that public key to GitHub as a **Deploy Key**:  
+- *GitHub repository* -> *Settings* -> *Deploy keys* -> *Add deploy key*
+- Title: Jenkins
+- Paste key
+- Leave "Allow Write Access" off, since Jenkins only needs to read
+This ensures that Jenkins can clone, can't push changes, and has minimal repository privileges.
+
+Then, on the Jenkins VM, trust GitHub host key:
+```bash
+sudo -u jenkins ssh -o StrictHostKeyChecking=accept-new git@github.com
+```
+This prevents interactive prompts during pipeline execution.
+
+In the case that it states that the `.../jenkins/.ssh` directory doesn't exist, we can create it with the correct ownership and permissions:
+```bash
+sudo -u jenkins mkdir -p /var/lib/jenkins/.ssh
+sudo chmod 700 /var/lib/jenkins/.ssh
+# After creating SSH key
+sudo chmod 600 /var/lib/jenkins/.ssh/id_ed25519
+sudo chmod 644 /var/lib/jenkins/.ssh/id_ed25519.pub
+```
+
+**Initialize Git Repo & Commit**  
+On the legacy VM, in the Spring Boot app, initialize Git repo and commit:
+```bash
+cd /path/to/project
+git config --global user.name "{your_GitHub_username}"
+git config --global user.email "{your_GitHub_email}"
+git init
+git add .
+git commit -m "{initial_import_description}"
+git branch -M main
+
+# Add remote and push
+git remote add origin git@github.com:<YOUR_USER>/legacy-service.git
+git push -u origin main
+```
+
+Now we need to create the `Dockerfile` next to `pom.xml`:
+```Dockerfile
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+COPY target/*.jar app.jar
+EXPOSE 8080
+ENTRYPOINT ["java","-jar","/app/app.jar"]
+```
+The key thing here is that we're producing an immutable runtime artifact.
+
+Now we can create and add the `Jenkinsfile` to the repo (*build* -> *docker* -> *push ECR*):
+```ruby
+pipeline {
+  agent any
+
+  environment {
+    AWS_REGION   = "us-east-1"
+    ECR_REGISTRY = "<Account_ID>.dkr.ecr.us-east-1.amazonaws.com"
+    ECR_REPO     = "springboot-legacy-app"
+    IMAGE_TAG    = "${env.BUILD_NUMBER}"
+  }
+
+  stages {
+    stage("Checkout") {
+      steps { checkout scm }
+    }
+
+
+stage('Build (Maven)') {
+  steps {
+    sh(label: 'Build with Bash', script: '''
+      bash -lc '
+        set -euo pipefail
+        set -x
+        echo "SHELL=$SHELL"
+        echo "0=$0"
+        ps -p $$ -o comm=
+
+        export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+        export PATH="$JAVA_HOME/bin:$PATH"
+
+        echo "JAVA_HOME=$JAVA_HOME"
+        which java
+        which javac
+        java -version
+        javac -version
+        mvn -version
+
+        mvn -B -V clean package -DskipTests
+      '
+    ''')
+  }
+}
+
+
+    stage("Docker build") {
+      steps {
+        sh '''
+          set -e
+          docker build -t ${ECR_REPO}:${IMAGE_TAG} .
+          docker tag ${ECR_REPO}:${IMAGE_TAG} ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}
+        '''
+      }
+    }
+
+    stage("Login to ECR") {
+      steps {
+        sh '''
+          set -e
+          aws ecr get-login-password --region ${AWS_REGION} \
+            | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+        '''
+      }
+    }
+
+    stage("Push to ECR") {
+      steps {
+        sh '''
+          set -e
+          docker push ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}
+        '''
+      }
+    }
+  }
+}
+```
+A declarative Jenkins pipeline was defined in this `Jenkinsfile` to codify the entire build process as code. The different pipeline stages included are:
+1. Checkout
+2. Maven Build
+3. Docker Build
+4. ECR Login
+5. Push to ECR
+For our environment configuration, by using `${BUILD_NUMBER}`, we ensure versioned image tags and avoid reliance on `latest`.
+
+After creating and editing both our `Dockerfile` and `Jenkinsfile`, let's commit it:
+```bash
+git add Dockerfile Jenkinsfile
+git commit -m "Add Dockerfile and Jenkinsfile for container build"
+```
+### Jenkins Job Configuration
+
+With the repository, Dockerfile, and Jenkinsfile committed to GitHub, we need to create a Jenkins Pipeline job to execute the CI workflow. Instead of defining build logic directly inside the Jenkins UI, the pipeline is defined as code (`Jenkinsfile`) and stored alongside the application source. The approach ensures the CI process is versioned, reviewable, and reproducible.
+
+Now we need to create the Jenkins job.
+Let's navigate back to the Jenkins web UI and login as our admin user. The follow these steps:
+- *New item* -> *`legacy-service-ci`* -> *Pipeline*
+- *Definition:* Pipeline script from SCM
+- *SCM:* Git
+- *Repo URL:* git@github.com:<your_user>:\<repo>.git
+- *Branch:* \*/main
+- *Script path:* Jenkinsfile
+- *Save*
+
+In Jenkins, Freestyle Jobs define steps in the UI, while Pipeline Jobs define steps as code.
+We chose:
+```python
+New Item → Pipeline
+Definition: Pipeline script from SCM
+```
+This means:
+- Jenkins pulls the `Jenkinsfile` from Git.
+- The pipeline definition lives with the code.
+- CI changes require Git commits (not UI edits).
+- Build logic is reproducible across Jenkins instances.
+
+With our SCM configuration using Git, this is what happens during execution; When a build starts:
+1. Jenkins authenticates via SSH (using the deploy key).
+2. The repository is cloned into a workspace directory: `/var/lib/jenkins/workspace/<job-name>/`.
+3. The `Jenkinsfile` is loaded.
+4. Jenkins interprets the pipeline stages.
+5. Each stage executes on the Jenkins node.
+
+Each pipeline run:
+- Creates or reuses a workspace directory.
+- Cleans files depending on pipeline behavior.
+- Stores build artifacts temporarily.
+- Is isolated per job.
+Build state does not persist across runs unless explicitly archived.
+
+**First Test Build**  
+Let's attempt our first build by selecting "Build Now".
+
+We'll notice that the Jenkins build failed and if we look at the console output, we may encounter a 403 Forbidden error when trying to connect to the ECR.
+
+When we try and run the following commands:
+```bash
+aws sts get-caller-identity
+aws ecr describe-repositories --region us-east-1 --repository-names springboot-legacy-app
+```
+
+We notice the first one returns successfully, but the second doesn't. That confirms that our Jenkins IAM user `jenkins-ecr` is missing ECR permissions. It's authenticated (via first command's success), but not authorized for `ecr:DescribeRepositories` (and very likely also missing the push actions), which is why we hit the 403 during the push phase of the Jenkins build.
+
+To fix this, we can attach an inline IAM policy to the `jenkins-ecr` user that allows:
+- `ecr:GetAuthorizationToken` (needed for `docker login`)
+- repo-scoped push/pull actions (needed for `docker push`)
+- optionally `ecr:DescribeRepositories` (nice for repo-existence checks)
+
+Navigate to *IAM -> Users -> `jenkins-ecr` -> Add permissions -> Create inline policy -> JSON*, and add this into the Policy editor:
+```JSON
+{
+	"Version": "2012-10-17",
+	"Statement": [
+		{
+			"Sid": "EcrAuthToken",
+			"Effect": "Allow",
+			"Action": "ecr:GetAuthorizationToken",
+			"Resource": "*"
+		},
+		{
+			"Sid": "EcrPushPullToSpecificRepo",
+			"Effect": "Allow",
+			"Action": [
+				"ecr:BatchCheckLayerAvailability",
+				"ecr:BatchGetImage",
+				"ecr:CompleteLayerUpload",
+				"ecr:GetDownloadUrlForLayer",
+				"ecr:InitiateLayerUpload",
+				"ecr:PutImage",
+				"ecr:UploadLayerPart",
+				"ecr:DescribeRepositories",
+				"ecr:DescribeImages",
+				"ecr:ListImages"
+			],
+			"Resource": "arn:aws:ecr:us-east-1:<Account_ID>:repository/springboot-legacy-app"
+		}
+	]
+}
+```
+Now we should have the correct permissions in place to support the entire build process. 
+
+Let's retry the Jenkins build and verify in AWS:
+When we navigate to ECR and click on our repo and then "Images," we should see tags for our container builds.
+
+**Build Metadata**  
+Each run generates:
+- A unique `BUILD_NUMBER`
+- A timestamp
+- A build log
+- A workspace snapshot
+We used:
+```ruby
+IMAGE_TAG = "${env.BUILD_NUMBER}"
+```
+This ties:
+- Docker image version
+- Jenkins build record
+- Git revision
+Together into a traceable artifact.
+
+### Key Problems Solved
+
+**Issue:**  
+During the implementation of a Jenkins CI pipeline for the legacy Spring Boot application, the Maven build stage consistently failed with the following error:
+- `error: release version 17 not supported`
+This error occurred despite Jenkins reporting Java 21 as the active runtime. The failure blocked downstream stages, such as the Docker build and ECR push, preventing the CI pipeline from completing.
+
+**Diagnostic:**  
+There were contradicting signals:
+- `java --version` → OpenJDK 21 ✅
+- `mvn --version` → Java 21 runtime ✅
+- Maven compiler configured with `--release 17` (valid)
+- Yet compilation failed with “release version 17 not supported”
+This suggests it was a toolchain inconsistency rather than a code issue.
+
+**Root Cause:**  
+The Jenkins build environment had an a Java runtime available (JRE), but not a usable Java compiler (`javac`) compatible with Java 17.
+- Jenkins had access to a JRE (or incomplete JDK)
+- `javac` was missing from the execution PATH
+- `JAVA_HOME` was unset in the Jenkins runtime
+- Maven was able to run, but could not compile
+Because Maven relies on `javac` (not just `java`) during compilation, the absence of a proper compiler caused Maven to fail with a misleading error message.
+	Instead of reporting `javac not found`, Maven outputted: `release version 17 not supported`
+
+**Secondary Contributing Factor:** *Jenkins Shell Behavior*  
+When we attempted to harden the build with strict shell options resulted in:
+	`set: Illegal option -o pipefail`
+
+This was caused because:
+- Jenkins `sh` steps default to `/bin/sh`
+- On Ubuntu, `/bin/sh` → `dash`
+- `dash` does not support `pipefail`
+
+This is what caused early script termination and prevented effective debugging. It took many recommits, pushes, and Jenkins build attempts.
+
+**Resolution:**
+*Step 1: Install a Full Java 17 JDK on Jenkins Node*
+On the Jenkins VM, install JDK and verify:
+```bash
+sudo apt install -y openjdk-17-jdk
+javac --version
+```
+
+*Step 2: Explicitly Control Java Toolchain in Pipeline*
+Updated the `Jenkinsfile` to explicitly export the correct Java environment:
+```Jenkinsfile
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+export PATH="$JAVA_HOME/bin:$PATH"
+```
+This ensured Maven consistently used a Java 17 compiler regardless of Jenkins defaults.
+
+*Step 3: Force Bash for Build Steps*
+To avoid `/bin/sh` limitations, Maven build steps were wrapped in Bash:
+```groovy
+bash -lc '
+  set -e
+  export JAVA_HOME=...
+  mvn clean package
+```
+This eliminated shell incompatibility and improved error visibility.
+
+**Preventative Measures:**
+1. Never Assume Java Runtime == Java Compiler
+	- Always verify `javac`, not just `java`
+	- CI nodes frequently have runtimes but not full JDKs
+2. Explicitly Control Build Toolchains
+	- Set `JAVA_HOME` and `PATH` in CI jobs 
+	- Avoid relying on system defaults
+3. Understand Jenkins Shell Semantics
+	- Jenkins uses `/bin/sh` by default
+	- Bash features must be explicitly invoked
+	- Each `sh` step is a separate shell
+4. Debug Inside the CI Environment
+	- Always validate tooling *inside Jenkins*, not from SSH sessions
+	- CI environments often differ from interactive shells
+
+**Summary:**
+We encountered a Maven build failure in Jenkins due to a Java toolchain mismatch. Although Jenkins reported Java 21, the environment lacked a usable `javac` compiler. We resolved this by installing a full Java 17 JDK and explicitly controlling the build environment within the pipeline, ensuring deterministic builds and preventing future CI drift.
 
 ---
 ## Platform VM & EKS
