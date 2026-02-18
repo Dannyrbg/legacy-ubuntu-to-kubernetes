@@ -958,7 +958,125 @@ This is overall a better approach and are complementary steps that secure the ap
 
 ## Jenkins VM
 
-**Status:** *Completed. Missing polished documentation*
+To eliminate manual artifact builds and enable repeatable, automated container image creation, we're going to introduce a dedicated Continuous Integration (CI) platform using Jenkins.
+
+Jenkins is responsible for:
+- Building the Spring Boot application
+- Producing Docker container images
+- Publishing versioned images to Amazon ECR
+
+Let's provision a dedicated Ubuntu 22.04 Server virtual machine within our Proxmox environment to host Jenkins. By separating Jenkins onto its own VM, it isolates build workloads from application runtime infrastructure, which reflects common enterprise CI architecture.
+
+Let's begin by preparing our system:
+```bash
+sudo apt update && sudo apt full-upgrade -y
+sudo apt install ca-certificates curl gnupg lsb-release git unzip jq -y
+```
+These tools support:
+- Repository key management
+- Secure package installation
+- Git-based source control
+- JSON processing
+
+Now we need to install Jenkins and our Java requirements:
+```bash
+# Add Jenkins repository key
+curl -fsSL https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key \
+  | sudo tee /usr/share/keyrings/jenkins-keyring.asc > /dev/null
+
+# Add Jenkins repository
+echo "deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/" \
+  | sudo tee /etc/apt/sources.list.d/jenkins.list > /dev/null
+
+# Java requirements (Java 21 - Jenkins needs it)
+sudo apt install fontconfig openjdk-21-jre -y
+```
+Install and start Jenkins:
+```bash
+sudo apt install jenkins -y
+sudo systemctl enable --now jenkins
+sudo systemctl status jenkins --no-pager
+```
+We can verify Jenkins is listening by runnnig:
+```bash
+ss -lntp | grep 8080
+```
+
+Let's use Uncomplicated Firewall (`ufw`) to expose Jenkins on port 8080:
+```bash
+sudo ufw allow 8080/tcp
+sudo ufw enable
+sudo ufw status
+```
+
+We can now navigate to the Jenkins web UI and configure it from there.
+Let's navigate to `http://<jenkins-vm-ip>:8080`
+We can find our initial admin password by opening the `initialAdminPassword` file in `/var/lib/jenkins/secrets/initialAdminPassword`.
+
+For the initial setup, select:
+- Install Suggested Plugins
+- Create administrative user
+### Docker
+
+Jenkins must be able to build Docker images locally before pushing them to Amazon ECR. Let's install the Docker Engine:
+```bash
+# Repository setup. Add Docker repo key
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+# Add Docker repo
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+  | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Install Docker
+sudo apt update
+sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y
+
+# Enable, start, and verify Docker
+sudo systemctl enable --now docker
+docker --version
+```
+
+By default, the Jenkins system user does not have permission to access the Docker daemon socket. Therefore, let's add the Jenkins user to the `docker` group using `usermod`:
+```bash
+sudo usermod -aG docker jenkins
+sudo usermod -aG docker $USER
+sudo systemctl restart jenkins
+```
+Let's confirm the Jenkins user can access Docker:
+```bash
+# Validation
+sudo -u jenkins docker ps
+```
+If the output matches the an empty list like the following:
+`CONTAINER ID     IMAGE     COMMAND     CREATED     STATUS     PORTS      NAMES`
+We've confirmed then that:
+- Jenkins can access Docker
+- Docker socket permissions are correct
+- No containers are currently running
+
+**Install Maven**
+Our next step is installing Maven. Maven is required for building the Spring Boot application within Jenkins. Although the project includes a Maven Wrapper (`mvnw`), installing Maven ensures consistent availability across pipeline stages.
+```bash
+sudo apt install maven -y
+mvn --version
+```
+
+**Install Required Jenkins Plugins**
+To support the container build and AWS publishing workflow, we need to install the following plugins in Jenkins (via web UI):
+- Docker Pipeline
+- AWS Credentials
+Restart Jenkins when prompted
+
+These plugins matter because:
+- Docker Pipeline enables `docker.build()` and container operations inside Jenkins pipelines.
+- AWS Credentials allows secure storage of IAM access keys for pushing images to ECR.
+These plugins enable the following workflow:
+`Spring Boot -> Docker Image -> Amazon ECR`
 
 ---
 ## ECR & IAM
