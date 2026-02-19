@@ -1085,7 +1085,7 @@ These plugins enable the following workflow:
 
 With the CI established, the next architectural component we're going to introduce is a container registry. Amazon Elastic Container Registry (ECR) serves as the artifact boundary between the build system (Jenkins) and the runtime platform (Kubernetes).
 
-**Why Introduce a Container Registry?**
+**Why Introduce a Container Registry?**  
 Up until this point, builds produced artifacts that were:
 - Stored locally
 - Manually transferred
@@ -1098,7 +1098,7 @@ That model doesn't scale. By introducing ECR, it's able to provide:
 - A pull-based deployment model for Kubernetes
 The main point here is, the container registry decouples artifact production from artifact consumption.
 
-**Repository Creation**
+**Repository Creation**  
 Let's create an ECR repository with the following configuration:
 - Visibility: Private
 - Repository name: `springboot-legacy-app`
@@ -1108,7 +1108,7 @@ Let's create an ECR repository with the following configuration:
 
 The repository is private to prevent public access to application images. Container images often contain application binaries and internal configuration that should not be publicly accessible. Furthermore, the repository region must align with the Kubernetes cluster region to avoid cross-region image pulls, which introduce latency and complexity.
 
-**Repository URI**
+**Repository URI**  
 After creation, AWS generates a repository URI:
 `<ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/springboot-legacy-app`
 This URI becomes:
@@ -1117,13 +1117,13 @@ This URI becomes:
 - The image reference in Kubernetes manifests
 The repository URI becomes the official artifact reference for all deployment stages.
 
-**Image Tag Strategy**
+**Image Tag Strategy**  
 Images will be tagged with version identifiers (e.g. build number) to allow deterministic deployments. Tag mutability was enabled for simplicity in our lab environment. Typically, in production systems, immutable tag policies are preferred to prevent accidental overwrites of released artifacts.
 
-**Encryption**
+**Encryption**  
 ECR images are encrypted at rest using AES-256 by default. This provides baseline protection for stored container layers.
 
-**Updated Architecture**
+**Updated Architecture**  
 At this stage, the architecture evolves from:
 `Legacy VM -> Local Artifact -> Manual Deployment`
 to:
@@ -1141,7 +1141,7 @@ This identity:
 - Has narrowly scoped permissions
 - Can be revoked independently
 
-**Create Machine User: `jenkins-ecr`**
+**Create Machine User: `jenkins-ecr`**  
 From the AWS console go to *IAM -> Users -> Create User*
 User Details:
 - Username: *jenkins-ecr*
@@ -1225,8 +1225,6 @@ We should now see two important things on our user's page:
 
 The architecture now establishes a controlled trust relationship:
 ```ascii
-The architecture now establishes a controlled trust relationship:
-
 Jenkins VM (external system)
         ↓
 IAM User: jenkins-ecr (least privilege)
