@@ -1939,3 +1939,10 @@ service/legacy-app-svc created
 # External Dependency Integration (PostgreSQL / RDS)
 
 **Status:** *In Progress*
+
+---
+
+# Future Upgrades
+- **Web Hook Trigger**
+	- Automatically triggers Jenkins pipeline
+- **Continuous Deployment: ArgoCD**
