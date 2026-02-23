@@ -16,19 +16,19 @@ spec:
       serviceAccountName: legacy-app-sa
       containers:
         - name: legacy-app
-          image: 861273430313.dkr.ecr.us-east-1.amazonaws.com/springboot-legacy-app:10
+          image: <Account-ID>.dkr.ecr.us-east-1.amazonaws.com/springboot-legacy-app:<Image-Tag>
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
           readinessProbe:
             httpGet:
-              path: /
+              path: /actuator/health/readiness
               port: 8080
             initialDelaySeconds: 10
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /
+              path: /actuator/health/liveness
               port: 8080
             initialDelaySeconds: 30
             periodSeconds: 20
