@@ -1860,21 +1860,41 @@ This confirms:
 - `kubeconfig` is valid
 
 **Deploy ECR Image into EKS**  
-1. Set variables:
+With EKS access configured and container images publishing successfully to ECR, the next step is deploying the application as a Kubernetes workload. 
+
+This deployment is intentionally treated as an initial platform validation:
+- Confirm EKS can pull the private image from ECR
+- Confirm pods can schedule and start
+- Confirm Kubernetes health checks behave as expected
+
+At this stage, full application functionality may not be available yet if the PostgreSQL dependency is not reachable from within AWS (i.e. still hosted in our local lab network or not yet  migrated to RDS). A failing deployment due to database connectivity can be treated as an expected dependency gap rather than a Kubernetes platform failure.
+
+1. Set Variables
+Let's begin by defining deployment variables. These variables are helpful because we avoid copy/paste mistakes, keep manifests reusable, and make it easy to swap image versions:
 ```bash
 export NS=legacy
 export APP=legacy-app
 export IMAGE="<ECR_IMAGE_URI_WITH_TAG>"
+# Verification
+echo "$NS $APP $IMAGE"
 ```
 
-2. Create namespace and service account
+2. Create Kubernetes Namespace and Service Account
+Creating the Kubernetes Namespace isolates resources for this workload. Creating the Service Account establishes a placeholder identity for future enhancements (e.g., IRSA - AWS security feature for EKS allowing you to associate a specific AWS IAM role with a K8S service account). Full disclosure, the `serviceaccount` isn't strictly required yet, but keeping it now makes later AWS integration cleaner.
 ```bash
 kubectl create namespace $NS --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n $NS create serviceaccount ${APP}-sa --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-3. Create our YAML file: *legacy-app.yaml*
-- Enter the following into the file and replace the image line with our real ECR image URI and tag:
+3. Create Deployment and Service Manifest
+A *Deployment* manages the desired state of the application pods, including:
+- Replica count
+- Rolling updates
+- Self-healing (restarts/replacement)
+
+Creating a *Service* provides a stable in-cluster endpoint (DNS and virtual IP) for the pods, allowing consumers to reach the application without tracking pod IPs.
+
+Let's create `legacy-app.yaml`:
 ```YAML
 apiVersion: apps/v1
 kind: Deployment
@@ -1926,14 +1946,43 @@ spec:
   type: ClusterIP
 ```
 
-4. Apply the manifest: `kubectl apply -f legacy-app.yaml`
-	- Expected output:
+Let's apply the Manifest:
+```bash
+kubectl apply -f legacy-app.yaml
+```
+The expected output should be:
 ```bash
 deployment.apps/legacy-app created
 service/legacy-app-svc created
 ```
+We can now observe the pod lifecycle by running:
+```bash
+kubectl -n "$NS" get pods -w
+```
+We want to see:
+- `ContainerCreating` as `Running`
+- `Ready` becoming `1/1` for each pod
+- No repeated restarts
+If the database is not reachable and the application requires PostgreSQL at startup, we may encounter:
+- `CrashLoopBackOff`
+- readiness probe failing
+- errors in logs about datasource connection failure
+This is acceptable at this stage because the database boundary has not yet been migrated into AWS networking (RDS) or otherwise reachable from EKS. If we wish to make the app start without the database, to validate HTTP functionality first, we could configure the app not to hard-fail when the database is down. This isn't necessary unless you want the pods to go `Ready` now.
 
-5. Watch the pods: `kubectl -n legacy get pods -w`
+At this point, the CI system is producing deployable container images and EKS is capable of scheduling the workload. Any remaining failures are likely related to our PostgreSQL external dependency reachability, which will be resolved during the RDS migration and networking configuration phase.
+
+4. Quick Troubleshooting
+```bash
+# Check events (image pulls, probes, scheduling)
+kubectl -n "$NS" describe pod -l app=legacy-app
+
+# Check logs
+kubectl -n "$NS" logs -l app=legacy-app --tail=100
+```
+Common outcomes and meaning:
+- `ImagePullBackOff`: ECR auth/role/network issue
+- `CrashLoopBackOff`: Application runtime error (often database connection)
+- `Readiness probe failed`: Application running but not "ready" (dependency is not healthy)
 
 ---
 # External Dependency Integration (PostgreSQL / RDS)
