@@ -1990,6 +1990,107 @@ Common outcomes and meaning:
 **Status:** *In Progress*
 
 ---
+# Teardown & Cost Cleanup
+
+After we complete our AWS EKS lab, want to ensure we don't incur any additional charges, and are ready to bring the effort to an end, we can take the following steps. We want to ensure the following:
+- All compute resources are terminated
+- No hidden infrastructure remains
+- Billing stops immediately
+- No orphaned regional resources
+- No lingering *CloudWatch* or *NAT* charges
+
+For the purpose of birds-eye view clarity and environmental clarity, this is our typical stack:
+- Amazon EKS (control plane)
+- EC2 Worker Nodes (Auto Mode / Node Groups)
+- NAT Gateway
+- Application Load Balancer
+- ECR Repository
+- CloudWatch logs
+- EBS volumes
+
+## Delete EKS Control Plane
+This will most likely be our primary cost driver. 
+**Console:**  
+```Code
+EKS -> Clusters -> Select Cluster -> Delete
+```
+**CLI:**  
+```
+aws eks delete-cluster --name <cluster-name>
+```
+This will stop our EKS control plane billing (~$70/month)
+
+## Verify EC2 Worker Nodes Are Terminated
+After our cluster deletion, navigate to:
+```code
+EC2 -> Instances
+```
+Ensure to terminate any remaining instances. Do not leave them as stopped. Ensure no Auto Scaling Groups remain.
+**CLI:**  
+```bash
+aws ec2 describe-instances
+```
+
+## Remove Hidden Cost Drivers
+1. **NAT Gateway**
+   - `VPC -> NAT Gateways -> Delete`
+   - NAT Gateway can cost potentially $30-$35, even if idle
+
+2. **Load Balancers**  
+   - `EC2 -> Load Balancers -> Delete`
+   - Also delete unused Target Groups
+
+3. **EBS Volumes**  
+   - `EC2 -> Volumes`
+   - Delete unattached volumes and orphaned storage from terminated instances
+
+4. **Elastic IPs**  
+   - `EC2 -> Elastic IPs -> Release`
+   - Unattached elastic IPs incur hourly charges
+
+## Registry & Storage Cleanup
+**Delete ECR Repositories:**  
+`ECR -> Repositories -> Delete`
+
+**Delete S3 Buckets (if used):**  
+`S3 -> Bucket -> Empty -> Delete`
+
+## CloudWatch Cleanup
+Deleting EKS does not delete log groups.
+
+**Delete Log Groups:**  
+`CloudWatch -> Logs -> Log groups`
+
+Delete:
+- `/aws/eks/cluster/<cluster-name>/cluster`
+- `/aws/containerinsights/*`
+- Application log groups
+- VPC flow logs
+CloudWatch charges for log ingestion, log storage, and metrics.
+
+**Delete Alarms:**  
+`CloudWatch -> Alarms -> Delete`
+
+## Regional Overview & Billing Verification
+Switch AWS region dropdown and verify no resources exist in other neighboring regions. Resources are region-specific, but billing is not.
+
+For verifying our billing, navigate to:
+`Billing -> Bills`
+Confirm that estimated charges stops increasing and no active service charges remain. Give it a couple hours wait time and refresh.
+
+**Preventative Guardrail: Budget Alert**  
+`Billing -> Budgets -> Create budget -> $X.XX threshold`
+
+**Lessons Learned:**  
+- EKS control plane incurs cost even without workloads.
+- NAT Gateways are silent cost drivers.
+- CloudWatch logs persist even after infrastructure deletion.
+- Regional sweep is very important.
+- Budget alerts should be configured before lab deployment.
+
+Cloud engineering is not just about deployment; It's also about controlled decommissioning.
+
+---
 
 # Future Upgrades
 - **Web Hook Trigger**
